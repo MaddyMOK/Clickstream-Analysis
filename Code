@@ -1,0 +1,214 @@
+session_id to group events. 
+Using a 30-minute gap in activity as the criteria for a new session definition
+---View with time stamp minus preceding timestamp using lag function over visitorid 
+---Using case statement if the the time between hits is greator then 30 mins to create new visit indicator 
+---Current hit to first hit registered in the visits as  days_first_visits
+
+CREATE VIEW Clickstream_derived AS
+
+    SELECT  clickstream.ts,
+            clickstream.visitorid,
+            clickstream.event,
+            clickstream.itemid,
+            clickstream.transactionid,
+            clickstream.ts::double precision - min(clickstream.ts::double precision) over (PARTITION BY clickstream.visitorid order by clickstream.ts) / (1000*60*60*24) as days_first_visits, 
+            to_timestamp(clickstream.ts::double precision / 1000::double precision) AS timestamp_cleaned,
+            CASE
+                    WHEN (clickstream.ts::double precision - lag(clickstream.ts::double precision) OVER (PARTITION BY clickstream.visitorid ORDER BY clickstream.ts)) >= (30 * 60 * 1000)::double precision THEN 1
+                    ELSE 0
+                END AS new_visit
+           FROM clickstream  
+
+
+---------Sessioned table -------
+---Sequenced visits made by the visitor as visit_number  
+---Visit_id : visitorid appended with '_' and visit_number  
+---Converted tranasctionid to an integer 
+---Converted days_first_visits to an integer 
+
+
+CREATE VIEW Clickstream_sessioned AS
+SELECT  Clickstream_derived.ts,
+        Clickstream_derived.visitorid,
+        Clickstream_derived.event,
+        Clickstream_derived.itemid,
+        cast(coalesce (NULLIF(Clickstream_derived.transactionid,''),'0' ) as integer) as transactionid,
+        Clickstream_derived.days_first_visits::bigint,
+        Clickstream_derived.timestamp_cleaned,
+        Clickstream_derived.new_visit,
+        Clickstream_derived.visitorid || '_'::text || sum (Clickstream_derived.new_visit) OVER (PARTITION BY Clickstream_derived.visitorid ORDER BY Clickstream_derived.ts) AS visit_id,
+        sum( Clickstream_derived.new_visit) OVER (PARTITION BY Clickstream_derived.visitorid ORDER BY Clickstream_derived.ts) AS visit_number
+   FROM Clickstream_derived;           
+
+
+------Site KPIs----------
+
+----- Total Visits ------
+Select count  (distinct  Clickstream_sessioned.visit_id)
+from Clickstream_sessioned
+---- Total Visits (out put) : 1761676
+
+------- Total orders -------
+Select count  (distinct  Clickstream_sessioned.transactionid)
+from Clickstream_sessioned
+where Clickstream_sessioned.transactionid > 0
+---- Total Orders (Output): 17671 
+
+---Site Over all coverison rate = 17671/1761676 = 1%
+
+
+--- View: visitorid No Order (no Purchase) in first 90days for the visit 
+create view visitorid_noorder_90days as   
+select distinct Clickstream_sessioned.visitorid
+from Clickstream_sessioned
+left join 
+(
+                                        select distinct Clickstream_sessioned.visitorid
+                                        from Clickstream_sessioned  
+                                        where Clickstream_sessioned.days_first_visits < 90
+                                        and Clickstream_sessioned.transactionid > 0
+                                        ) as tbl
+                                        on Clickstream_sessioned.visitorid = tbl.visitorid
+where tbl.visitorid is NULL                                     
+
+
+
+---Final 2 Query:  
+--- Visits Count 
+---For the visitorid had no purchase in first 90 days of the first visit 
+ 
+
+Select count  (distinct  Clickstream_sessioned.visit_id)
+from Clickstream_sessioned
+where Clickstream_sessioned.visitorid  in   (
+                                        select distinct visitorid
+                                        from visitorid_noorder_90days )
+
+--- Visits (Output): 1719566
+
+---Orders count 
+---For the visitorid had no purchase in first 90 days of the first visit 
+---Hence the orders were placed after the 90 days of the first visits 
+
+----Customers Orders who did no make any purchase in first 90 days BUT visited atlest once
+Select count  (distinct  Clickstream_sessioned.transactionid)
+from Clickstream_sessioned
+where Clickstream_sessioned.days_first_visits > 90 
+and   Clickstream_sessioned.visitorid  in   (
+                                        select distinct visitorid
+                                        from visitorid_noorder_90days )
+
+--- output : 84 
+--this cohort Conversion rate: 84/1719566 = 0.004%   
+
+
+
+---- Final 3 Query ---
+--- tbl_visit: visitorid, first visit: time stamp  
+----tbl_visit: visitorid, first transaction: time stamp
+----firstvisit_firstorder : Velocity to first Purchase 
+
+select firstvisit_firstorder, sum(visits) as sum_visits, sum(orders) as sum_orders, round (sum(orders)/sum(visits),2)*100  as conversion_rate  
+from 
+(
+
+select *, ceiling((tbl_order.ts::double precision -  tbl_visit.ts::double precision)/(1000*60*60*24))::int as firstvisit_firstorder
+from 
+    (
+select visitorid, min( ts ) as ts, count (*) as visits  
+from Clickstream_sessioned
+group by visitorid
+having sum(transactionid ) != 0 
+    )as tbl_visit  
+
+join 
+
+    (
+select visitorid, min( ts ) as ts, count (distinct transactionid) as orders 
+from Clickstream_sessioned
+where transactionid  != 0
+group by visitorid
+    ) as tbl_order
+
+on tbl_visit.visitorid = tbl_order.visitorid
+
+) as tbl_test
+
+group by firstvisit_firstorder
+order by firstvisit_firstorder
+
+
+
+
+
+
+--- final 4 Question query --
+
+--- tbl_1 : Transactionid, timestamp  
+--- tbl_2 : Purchase velocity diffrent in time stamp using lag() fucntion over visitor id 
+--- tbl_3 : Average purchase velocity over visitorid
+--- tbl_4 : Visitorid & Orders count  by the visitor
+--- tbl_5 : Join Average Purchase velocity, Visitorid & Orders by the visitor
+--- tbl_6 : Visitorid & total_days_engaged: time lapsed between first visits to last visit by the visitor 
+--- tbl_7 : join Average Purchase velocity, Visitorid, Orders by the visitor & total_days_engaged
+---------- Case statments to bucket Average Purchase velocity: Sum of Orders, Count of visitors, sum of total_days_engaged        
+Select 
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 5) then 1  else 0 END) AS  "5days_visitors",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 10) then 1  else 0 END) AS "10days_visitors",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 20) then 1  else 0 END) AS "20days_visitors",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 30) then 1  else 0 END) AS "30days_visitors",
+    sum(case when ((avg_purchase_velocity)>0)  then 1  else 0 END) AS "30+days_visitors",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 5) then orders  else 0 END) AS  "5days_orders",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 10) then orders  else 0 END) AS "10days_orders",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 20) then orders  else 0 END) AS "20days_orders",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 30) then orders  else 0 END) AS "30days_orders",
+    sum(case when ((avg_purchase_velocity)>0)  then orders  else 0 END) AS "30+days_orders",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 5) then total_days_engaged  else 0 END) AS  "5days_orders_total_days_engaged",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 10) then total_days_engaged  else 0 END) AS "10days_orders_total_days_engaged",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 20) then total_days_engaged  else 0 END) AS "20days_orders_10days_orders_total_days_engaged",
+    sum(case when ((avg_purchase_velocity)>0  and (avg_purchase_velocity)<= 30) then total_days_engaged  else 0 END) AS "30days_orders_10days_orders_total_days_engaged",
+    sum(case when ((avg_purchase_velocity)>0)  then total_days_engaged  else 0 END) AS "30+days_orders_10days_orders_total_days_engaged" 
+
+from 
+(
+select tbl_5.visitorid,  tbl_5.avg_purchase_velocity, tbl_5.orders,tbl_6.total_days_engaged  
+from 
+    (
+select tbl_3.visitorid,  tbl_3.avg_purchase_velocity, tbl_4.orders  
+from 
+                    (
+select visitorid, avg(purchase_velocity) as avg_purchase_velocity  
+from 
+                        (
+select *, ceiling((ts::double precision - lag (ts) over (PARTITION by visitorid order by ts) ::double precision ))/(1000*60*60*24)::int  as purchase_velocity 
+from                            (
+select visitorid, transactionid,  max (ts) as ts
+from Clickstream_sessioned
+where transactionid  != 0
+group by visitorid, transactionid 
+                                ) as tbl_1
+                        ) as tbl_2
+where purchase_velocity is not  NULL
+group by visitorid
+                    ) as tbl_3
+inner join 
+        (
+select visitorid,  count (distinct transactionid) as orders 
+from Clickstream_sessioned
+where transactionid  != 0
+group by visitorid
+        ) as tbl_4
+
+on tbl_3.visitorid = tbl_4.visitorid
+    ) as tbl_5
+
+inner join 
+(
+select distinct visitorid as visitorid , (max(days_first_visits) +1 ) as total_days_engaged
+from Clickstream_sessioned
+group by visitorid 
+) as tbl_6
+
+on tbl_5.visitorid = tbl_6.visitorid
+) as tbl_7
+
