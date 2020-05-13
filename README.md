@@ -11,5 +11,5 @@ Velocity between purchases</p>
 
 A/B test Set up: 2th reports walks through how to set up a customer facing A/B test to establish casual relation</p>      
 
-the Code is commented </p>
+The Code is commented </p>
 This repo has the sample data dump from the Clickstream </p>
