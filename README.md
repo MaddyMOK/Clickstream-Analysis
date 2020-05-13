@@ -6,8 +6,9 @@ This Exercise is gives a glimpse of Data transformation of the raw Weblogs/Click
 Hypothesis-Customers who do not make a purchase within 90 days of their first site visit are unlikely to ever convert to a purchase.
 Hypothesis- The potential indicators of long-term customer value are Customer/Visitor on site (website) behaviors  
 Signals: 
-> Velocity to first purchase 
-> Velocity between purchases
+
+Velocity to first purchase 
+Velocity between purchases
 
 A/B test Set up: 2th reports walks through how to set up a customer facing A/B test to establish casual relation      
 
